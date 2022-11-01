@@ -20,6 +20,22 @@ namespace cmudb {
 class LockManager {
 
 public:
+  struct TxItem{
+    TxItem(txn_id tid,LockMode mode,bool granted): 
+            tid_(tid),mode_(mode),granted_(granted){}
+    void Wait(){
+
+    }
+
+    void Grant(){
+
+    }
+    mutex mutex_;
+    std::condition_variable cv_;
+    txn_id_t tid_;
+    LockMode mode_;
+    bool granted_;
+  }
   LockManager(bool strict_2PL) : strict_2PL_(strict_2PL){};
 
   /*** below are APIs need to implement ***/
