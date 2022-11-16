@@ -11,11 +11,23 @@
 
 #include "buffer/replacer.h"
 #include "hash/extendible_hash.h"
-
+#include <memory>
+#include <unordered_map>
+#include <mutex>
 namespace cmudb {
 
 template <typename T> class LRUReplacer : public Replacer<T> {
 public:
+  struct Node
+  {
+    Node(){}; 
+    Node(T value): val(value){};
+    T val;
+    shared_ptr<Node> prev;
+    shared_ptr<Node> next;
+
+  };
+  
   // do not change public interface
   LRUReplacer();
 
@@ -31,6 +43,10 @@ public:
 
 private:
   // add your member variables here
+  shared_ptr<Node> tail;
+  shared_ptr<Node> head;
+  unorder_map<T,shared_ptr<node>> map;
+  mutable mutex lautch;
 };
 
 } // namespace cmudb
