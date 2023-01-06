@@ -45,8 +45,43 @@ BufferPoolManager::~BufferPoolManager() {
  * entry for the new page.
  * 4. Update page metadata, read page content from disk file and return page
  * pointer
+ * 
+ * 1. 搜索哈希表。
+ * 1.1 如果存在，钉住该页并立即返回
+ * 1.2 如果不存在，从free list或lru中找到一个替换条目(注意：先从自由列表中查找)
+ * 2.如果被替换的条目是脏的，就把它写回磁盘。
+ * 3.从哈希表中删除旧页的条目，并为新的页面插入一个条目。
+ * 4. 更新页面元数据，从磁盘文件中读取页面内容并返回页面指针
+ * 
+ * This function must mark the Page as pinned and remove its entry from LRUReplacer before it is returned to the caller.
  */
-Page *BufferPoolManager::FetchPage(page_id_t page_id) { return nullptr; }
+Page *BufferPoolManager::FetchPage(page_id_t page_id) {
+  lock_guard<mutex> lck(latch_);
+  Page *tar = nullptr;
+  if (page_table_->Find(page_id,tar)) { //1.1
+    tar->pin_count_++;
+    replacer_->Erase(tar);
+    return tar;
+  }
+  //1.2
+  tar = GetVictimPage();
+  if (tar == nullptr) return tar;
+  //2
+  if (tar->is_dirty_) {
+    disk_manager_->WritePage(tar->GetPageId(),tar->data_);
+  }
+  //3
+  page_table_->Remove(tar->GetPageId());
+  page_table_->Insert(page_id,tar);
+  //4
+  disk_manager_->ReadPage(page_id,tar->data_);
+  tar->pin_count_ = 1;
+  tar->is_dirty_ = false;
+  tar->page_id_= page_id;
+
+  return tar;
+}
+//Page *BufferPoolManager::find
 
 /*
  * Implementation of unpin page
@@ -55,7 +90,21 @@ Page *BufferPoolManager::FetchPage(page_id_t page_id) { return nullptr; }
  * dirty flag of this page
  */
 bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
-  return false;
+  lock_guard<mutex> lck(latch_);
+  Page *tar = nullptr;
+  page_table_->Find(page_id,tar);
+  if (tar == nullptr) {
+    return false;
+  }
+  tar->is_dirty_ = is_dirty;
+  if (tar->GetPinCount() <= 0) {
+    return false;
+  }
+  ;
+  if (--tar->pin_count_ == 0) {
+    replacer_->Insert(tar);
+  }
+  return true;
 }
 
 /*
@@ -64,7 +113,20 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
  * if page is not found in page table, return false
  * NOTE: make sure page_id != INVALID_PAGE_ID
  */
-bool BufferPoolManager::FlushPage(page_id_t page_id) { return false; }
+bool BufferPoolManager::FlushPage(page_id_t page_id) {
+  lock_guard<mutex> lck(latch_);
+  Page *tar = nullptr;
+  page_table_->Find(page_id,tar);
+  if (tar == nullptr || tar->page_id_ == INVALID_PAGE_ID) {
+    return false;
+  }
+  if (tar->is_dirty_) {
+    disk_manager_->WritePage(page_id,tar->GetData());
+    tar->is_dirty_ = false;
+  }
+
+  return true;
+}
 
 /**
  * User should call this method for deleting a page. This routine will call
@@ -74,7 +136,23 @@ bool BufferPoolManager::FlushPage(page_id_t page_id) { return false; }
  * call disk manager's DeallocatePage() method to delete from disk file. If
  * the page is found within page table, but pin_count != 0, return false
  */
-bool BufferPoolManager::DeletePage(page_id_t page_id) { return false; }
+bool BufferPoolManager::DeletePage(page_id_t page_id) {
+  lock_guard<mutex> lck(latch_);
+  Page *tar = nullptr;
+  page_table_->Find(page_id,tar);
+  if (tar != nullptr) {
+    if (tar->GetPinCount() > 0) {
+      return false;
+    }
+    replacer_->Erase(tar);
+    page_table_->Remove(page_id);
+    tar->is_dirty_= false;
+    tar->ResetMemory();
+    free_list_->push_back(tar);
+  }
+  disk_manager_->DeallocatePage(page_id);
+  return true;
+}
 
 /**
  * User should call this method if needs to create a new page. This routine
@@ -84,5 +162,44 @@ bool BufferPoolManager::DeletePage(page_id_t page_id) { return false; }
  * update new page's metadata, zero out memory and add corresponding entry
  * into page table. return nullptr if all the pages in pool are pinned
  */
-Page *BufferPoolManager::NewPage(page_id_t &page_id) { return nullptr; }
+Page *BufferPoolManager::NewPage(page_id_t &page_id) {
+  lock_guard<mutex> lck(latch_);
+  Page *tar = nullptr;
+  tar = GetVictimPage();
+  if (tar == nullptr) return tar;
+
+  page_id = disk_manager_->AllocatePage();
+  //2
+  if (tar->is_dirty_) {
+    disk_manager_->WritePage(tar->GetPageId(),tar->data_);
+  }
+  //3
+  page_table_->Remove(tar->GetPageId());
+  page_table_->Insert(page_id,tar);
+
+  //4
+  tar->page_id_ = page_id;
+  tar->ResetMemory();
+  tar->is_dirty_ = false;
+  tar->pin_count_ = 1;
+
+  return tar;
+}
+
+Page *BufferPoolManager::GetVictimPage() {
+  Page *tar = nullptr;
+  if (free_list_->empty()) {
+    if (replacer_->Size() == 0) {
+      return nullptr;
+    }
+    replacer_->Victim(tar);
+  } else {
+    tar = free_list_->front();
+    free_list_->pop_front();
+    assert(tar->GetPageId() == INVALID_PAGE_ID);
+  }
+  assert(tar->GetPinCount() == 0);
+  return tar;
+}
+
 } // namespace cmudb
