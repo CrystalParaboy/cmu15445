@@ -13,14 +13,14 @@
 
 #include "disk/disk_manager.h"
 #include "logging/log_record.h"
-
+using namespace std;
 namespace cmudb {
 
 class LogManager {
 public:
   LogManager(DiskManager *disk_manager)
-      : next_lsn_(0), persistent_lsn_(INVALID_LSN),
-        disk_manager_(disk_manager) {
+          : needFlush_(false),next_lsn_(0), persistent_lsn_(INVALID_LSN),
+            disk_manager_(disk_manager) {
     // TODO: you may intialize your own defined memeber variables here
     log_buffer_ = new char[LOG_BUFFER_SIZE];
     flush_buffer_ = new char[LOG_BUFFER_SIZE];
@@ -44,10 +44,15 @@ public:
   inline void SetPersistentLSN(lsn_t lsn) { persistent_lsn_ = lsn; }
   inline char *GetLogBuffer() { return log_buffer_; }
 
+  void Flush(bool force);
 private:
   // TODO: you may add your own member variables
   // also remember to change constructor accordingly
-
+  int32_t logBufferOffset_ = 0;
+  int32_t flushBufferSize_ = 0;
+  atomic<bool> needFlush_; //for group commit
+  lsn_t lastLsn_ = INVALID_LSN; //update in append log, use it in flush
+  condition_variable appendCv_; // for notifying append thread
   // atomic counter, record the next log sequence number
   std::atomic<lsn_t> next_lsn_;
   // log records before & include persistent_lsn_ have been written to disk

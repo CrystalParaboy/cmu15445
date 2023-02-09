@@ -45,14 +45,7 @@ BufferPoolManager::~BufferPoolManager() {
  * entry for the new page.
  * 4. Update page metadata, read page content from disk file and return page
  * pointer
- * 
- * 1. 搜索哈希表。
- * 1.1 如果存在，钉住该页并立即返回
- * 1.2 如果不存在，从free list或lru中找到一个替换条目(注意：先从自由列表中查找)
- * 2.如果被替换的条目是脏的，就把它写回磁盘。
- * 3.从哈希表中删除旧页的条目，并为新的页面插入一个条目。
- * 4. 更新页面元数据，从磁盘文件中读取页面内容并返回页面指针
- * 
+ *
  * This function must mark the Page as pinned and remove its entry from LRUReplacer before it is returned to the caller.
  */
 Page *BufferPoolManager::FetchPage(page_id_t page_id) {
@@ -68,6 +61,12 @@ Page *BufferPoolManager::FetchPage(page_id_t page_id) {
   if (tar == nullptr) return tar;
   //2
   if (tar->is_dirty_) {
+    //Before your buffer pool manager evicts a dirty page from LRU replacer and write this page back to db file,
+    // it needs to flush logs up to pageLSN. You need to compare persistent_lsn_ (a member variable maintains
+    // by Log Manager) with your pageLSN. However unlike group commit, buffer pool can force log manager to flush log
+    // buffer, but still needs to wait for logs to be permanently stored before continue
+    if (ENABLE_LOGGING && log_manager_->GetPersistentLSN() < tar->GetLSN())
+      log_manager_->Flush(true);
     disk_manager_->WritePage(tar->GetPageId(),tar->data_);
   }
   //3
@@ -96,11 +95,15 @@ bool BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty) {
   if (tar == nullptr) {
     return false;
   }
-  tar->is_dirty_ = is_dirty;
+  tar->is_dirty_ |= is_dirty;
+
   if (tar->GetPinCount() <= 0) {
+//    cout<<"error "<<tar->GetPageId()<<endl;
+    assert(false);
     return false;
   }
   ;
+  //std::cout<<"page id :"<<page_id<<"pin count"<<tar->pin_count_<<endl;
   if (--tar->pin_count_ == 0) {
     replacer_->Insert(tar);
   }
@@ -142,12 +145,15 @@ bool BufferPoolManager::DeletePage(page_id_t page_id) {
   page_table_->Find(page_id,tar);
   if (tar != nullptr) {
     if (tar->GetPinCount() > 0) {
+ //     cout<<"DeletePage error"<<tar->page_id_<<endl;
+//      assert(false);
       return false;
     }
     replacer_->Erase(tar);
     page_table_->Remove(page_id);
     tar->is_dirty_= false;
     tar->ResetMemory();
+    tar->page_id_ = INVALID_PAGE_ID;
     free_list_->push_back(tar);
   }
   disk_manager_->DeallocatePage(page_id);
@@ -166,11 +172,15 @@ Page *BufferPoolManager::NewPage(page_id_t &page_id) {
   lock_guard<mutex> lck(latch_);
   Page *tar = nullptr;
   tar = GetVictimPage();
-  if (tar == nullptr) return tar;
+  if (tar == nullptr) {
+    return tar;
+  }
 
   page_id = disk_manager_->AllocatePage();
   //2
   if (tar->is_dirty_) {
+    if (ENABLE_LOGGING && log_manager_->GetPersistentLSN() < tar->GetLSN())
+      log_manager_->Flush(true);
     disk_manager_->WritePage(tar->GetPageId(),tar->data_);
   }
   //3
@@ -198,8 +208,23 @@ Page *BufferPoolManager::GetVictimPage() {
     free_list_->pop_front();
     assert(tar->GetPageId() == INVALID_PAGE_ID);
   }
-  assert(tar->GetPinCount() == 0);
+  if (tar != nullptr) {
+    assert(tar->GetPinCount() == 0);
+  }
   return tar;
+}
+
+//DEBUG
+bool BufferPoolManager::CheckAllUnpined() {
+  bool res = true;
+  for (size_t i = 1; i < pool_size_; i++) {
+    if (pages_[i].pin_count_ != 0) {
+      res = false;
+      std::cout<<"page "<<pages_[i].page_id_<<" pin count:"<<pages_[i].pin_count_<<endl;
+    }
+
+  }
+  return res;
 }
 
 } // namespace cmudb

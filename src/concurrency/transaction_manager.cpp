@@ -12,7 +12,9 @@ Transaction *TransactionManager::Begin() {
   Transaction *txn = new Transaction(next_txn_id_++);
 
   if (ENABLE_LOGGING) {
-    // TODO: write log and update transaction's prev_lsn here
+    assert(txn->GetPrevLSN() == INVALID_LSN);
+    LogRecord log{txn->GetTransactionId(), txn->GetPrevLSN(), LogRecordType::BEGIN};
+    txn->SetPrevLSN(log_manager_->AppendLogRecord(log));
   }
 
   return txn;
@@ -33,8 +35,12 @@ void TransactionManager::Commit(Transaction *txn) {
   }
   write_set->clear();
 
-  if (ENABLE_LOGGING) {
-    // TODO: write log and update transaction's prev_lsn here
+  if (ENABLE_LOGGING) {//, you need to make sure your log records are permanently stored on disk file before release the
+    // locks. But instead of forcing flush, you need to wait for LOG_TIMEOUT or other operations to implicitly trigger
+    // the flush operations. write log and update transaction's prev_lsn here
+    LogRecord log{txn->GetTransactionId(), txn->GetPrevLSN(), LogRecordType::COMMIT};
+    txn->SetPrevLSN(log_manager_->AppendLogRecord(log));
+    log_manager_->Flush(false);
   }
 
   // release all the lock
@@ -71,7 +77,10 @@ void TransactionManager::Abort(Transaction *txn) {
   write_set->clear();
 
   if (ENABLE_LOGGING) {
-    // TODO: write log and update transaction's prev_lsn here
+    // write log and update transaction's prev_lsn here
+    LogRecord log{txn->GetTransactionId(), txn->GetPrevLSN(), LogRecordType::ABORT};
+    txn->SetPrevLSN(log_manager_->AppendLogRecord(log));
+    log_manager_->Flush(false);
   }
 
   // release all the lock
